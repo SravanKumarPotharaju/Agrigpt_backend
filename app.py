@@ -1,10 +1,10 @@
 """
 FastAPI + LangGraph Agent with Tools
-Full observability with LangSmith tracing
+LangSmith observability via LANGCHAIN_TRACING_V2 (auto-tracing)
 """
 
 import os
-import json
+import re
 import traceback
 from typing import Annotated, TypedDict, List, Dict, Any
 
@@ -20,8 +20,6 @@ from langgraph.graph.message import add_messages
 from langchain_core.tools import StructuredTool
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langsmith import Client
-from langsmith.run_helpers import traceable
 
 # ============================================================
 # ENV
@@ -32,13 +30,14 @@ GOOGLE_API_KEY    = os.getenv("GOOGLE_API_KEY", "")
 API_KEY           = os.getenv("API_KEY", "")
 langsmith_api_key = os.getenv("LANGSMITH_API_KEY", "")
 
-# ── LangSmith setup ──────────────────────────────────────────
+# LangSmith auto-tracing — no decorators needed
+# Just set env vars and every LangChain/LangGraph call is traced automatically
 if langsmith_api_key:
     os.environ["LANGCHAIN_TRACING_V2"] = "true"
     os.environ["LANGCHAIN_ENDPOINT"]   = "https://api.smith.langchain.com"
     os.environ["LANGCHAIN_API_KEY"]    = langsmith_api_key
     os.environ["LANGCHAIN_PROJECT"]    = os.getenv("LANGCHAIN_PROJECT", "agrigpt-backend-agent")
-    print(f"[LangSmith] Tracing enabled -> project: {os.environ['LANGCHAIN_PROJECT']}")
+    print(f"[LangSmith] Auto-tracing enabled -> {os.environ['LANGCHAIN_PROJECT']}")
 else:
     print("[LangSmith] No API key — tracing disabled")
 
@@ -60,13 +59,11 @@ async def verify_api_key(key: str = Security(api_key_header)):
     if API_KEY and key != API_KEY:
         raise HTTPException(status_code=403, detail="Invalid or missing API Key")
 
-ls_client = Client() if langsmith_api_key else None
-
 # ============================================================
-# GLOBAL TOOL STORAGE & HISTORY
+# GLOBAL STORAGE & HISTORY
 # ============================================================
 global_tool_results: List[Dict[str, Any]] = []
-in_memory_history: Dict[str, list] = {}
+in_memory_history:   Dict[str, list]       = {}
 
 def load_history(chat_id: str) -> list:
     return in_memory_history.get(chat_id, [])
@@ -77,41 +74,39 @@ def save_history(chat_id: str, messages: list):
 # ============================================================
 # TOOLS
 # ============================================================
-
-@traceable(name="simulate_pests", tags=["tool", "pest"])
 def simulate_pests(crop_name: str, location: str = "general") -> str:
     """Simulates pest and disease activity for a given crop and location."""
     pest_data = {
-        "rice": "Possible Blast disease or Stem Borer activity detected. Treatment: Use Tricyclazole for blast and Chlorantraniliprole for stem borer.",
-        "wheat": "Risk of Rust disease. Maintain proper irrigation and use fungicides if yellow spots appear.",
-        "tomato": "Early Blight likely due to humidity. Increase spacing and apply copper-based fungicides.",
-        "cotton": "Pink Bollworm alert! Use pheromone traps and avoid late sowing.",
-        "maize": "Fall Armyworm detected. Apply Emamectin Benzoate or Spinetoram. Check leaves for egg masses.",
+        "rice":      "Possible Blast disease or Stem Borer activity detected. Treatment: Use Tricyclazole for blast and Chlorantraniliprole for stem borer.",
+        "wheat":     "Risk of Rust disease. Maintain proper irrigation and use fungicides if yellow spots appear.",
+        "tomato":    "Early Blight likely due to humidity. Increase spacing and apply copper-based fungicides.",
+        "cotton":    "Pink Bollworm alert! Use pheromone traps and avoid late sowing.",
+        "maize":     "Fall Armyworm detected. Apply Emamectin Benzoate or Spinetoram. Check leaves for egg masses.",
         "sugarcane": "Risk of Red Rot and Woolly Aphid infestation. Use resistant varieties and spray Dimethoate.",
-        "soybean": "Soybean Mosaic Virus risk. Control aphid vectors with Imidacloprid and remove infected plants.",
+        "soybean":   "Soybean Mosaic Virus risk. Control aphid vectors with Imidacloprid and remove infected plants.",
         "groundnut": "Leaf Spot and Tikka disease alert. Apply Mancozeb every 10-15 days during humid conditions.",
         "sunflower": "Downy Mildew risk detected. Use metalaxyl-treated seeds and avoid waterlogging.",
-        "chilli": "Thrips and Mite infestation likely. Spray Abamectin or Fipronil. Avoid water stress.",
-        "onion": "Purple Blotch and Thrips alert. Apply Mancozeb + Carbendazim and maintain field hygiene.",
-        "potato": "Late Blight high risk due to cool and moist conditions. Apply Cymoxanil + Mancozeb immediately.",
-        "mustard": "Aphid and Alternaria Blight warning. Spray Oxydemeton-Methyl and remove crop debris post-harvest.",
-        "banana": "Panama Wilt (Fusarium) risk. Use disease-free suckers and apply Trichoderma to soil.",
-        "mango": "Mango Hopper and Powdery Mildew alert. Spray Imidacloprid for hoppers and Wettable Sulfur for mildew.",
-        "grapes": "Downy and Powdery Mildew risk high. Apply Fosetyl-Al and Hexaconazole alternately.",
-        "peas": "Powdery Mildew and Pod Borer likely. Use Karathane for mildew and Indoxacarb for borers.",
-        "lentils": "Stemphylium Blight and Aphid attack. Spray Iprodione and use yellow sticky traps.",
-        "cabbage": "Diamondback Moth (DBM) alert. Use Spinosad or NSKE 5% spray. Practice crop rotation.",
-        "brinjal": "Shoot and Fruit Borer infestation. Apply Emamectin Benzoate and remove affected shoots promptly.",
-        "cucumber": "Downy Mildew and Red Pumpkin Beetle risk. Spray Chlorothalonil and use ash around plant base.",
-        "chickpea": "Helicoverpa Pod Borer high risk. Apply Indoxacarb or HaNPV. Monitor using pheromone traps.",
-        "jowar": "Shoot Fly and Aphid alert. Treat seeds with Imidacloprid and spray Dimethoate at early growth.",
-        "bajra": "Downy Mildew and Ergot disease risk. Use resistant hybrids and apply Metalaxyl seed treatment.",
-        "turmeric": "Rhizome Rot and Leaf Blotch detected. Treat rhizomes with Mancozeb before planting.",
-        "ginger": "Soft Rot (Pythium) risk high. Drench soil with Copper Oxychloride and ensure good drainage.",
-        "coffee": "White Stem Borer and Berry Borer alert. Use Chlorpyrifos and maintain shade tree management.",
-        "tea": "Blister Blight and Red Spider Mite risk. Apply Hexaconazole and Dicofol respectively.",
-        "coconut": "Rhinoceros Beetle and Bud Rot alert. Apply Carbaryl and remove decaying organic matter.",
-        "papaya": "Papaya Ringspot Virus via aphids. Remove infected plants and control aphids with Mineral Oil spray."
+        "chilli":    "Thrips and Mite infestation likely. Spray Abamectin or Fipronil. Avoid water stress.",
+        "onion":     "Purple Blotch and Thrips alert. Apply Mancozeb + Carbendazim and maintain field hygiene.",
+        "potato":    "Late Blight high risk due to cool and moist conditions. Apply Cymoxanil + Mancozeb immediately.",
+        "mustard":   "Aphid and Alternaria Blight warning. Spray Oxydemeton-Methyl and remove crop debris post-harvest.",
+        "banana":    "Panama Wilt (Fusarium) risk. Use disease-free suckers and apply Trichoderma to soil.",
+        "mango":     "Mango Hopper and Powdery Mildew alert. Spray Imidacloprid for hoppers and Wettable Sulfur for mildew.",
+        "grapes":    "Downy and Powdery Mildew risk high. Apply Fosetyl-Al and Hexaconazole alternately.",
+        "peas":      "Powdery Mildew and Pod Borer likely. Use Karathane for mildew and Indoxacarb for borers.",
+        "lentils":   "Stemphylium Blight and Aphid attack. Spray Iprodione and use yellow sticky traps.",
+        "cabbage":   "Diamondback Moth (DBM) alert. Use Spinosad or NSKE 5% spray. Practice crop rotation.",
+        "brinjal":   "Shoot and Fruit Borer infestation. Apply Emamectin Benzoate and remove affected shoots promptly.",
+        "cucumber":  "Downy Mildew and Red Pumpkin Beetle risk. Spray Chlorothalonil and use ash around plant base.",
+        "chickpea":  "Helicoverpa Pod Borer high risk. Apply Indoxacarb or HaNPV. Monitor using pheromone traps.",
+        "jowar":     "Shoot Fly and Aphid alert. Treat seeds with Imidacloprid and spray Dimethoate at early growth.",
+        "bajra":     "Downy Mildew and Ergot disease risk. Use resistant hybrids and apply Metalaxyl seed treatment.",
+        "turmeric":  "Rhizome Rot and Leaf Blotch detected. Treat rhizomes with Mancozeb before planting.",
+        "ginger":    "Soft Rot (Pythium) risk high. Drench soil with Copper Oxychloride and ensure good drainage.",
+        "coffee":    "White Stem Borer and Berry Borer alert. Use Chlorpyrifos and maintain shade tree management.",
+        "tea":       "Blister Blight and Red Spider Mite risk. Apply Hexaconazole and Dicofol respectively.",
+        "coconut":   "Rhinoceros Beetle and Bud Rot alert. Apply Carbaryl and remove decaying organic matter.",
+        "papaya":    "Papaya Ringspot Virus via aphids. Remove infected plants and control aphids with Mineral Oil spray."
     }
     result = pest_data.get(
         crop_name.lower(),
@@ -120,7 +115,6 @@ def simulate_pests(crop_name: str, location: str = "general") -> str:
     return f"Pest Simulation Results for {crop_name} in {location}: {result}"
 
 
-@traceable(name="government_schemes", tags=["tool", "schemes"])
 def get_government_schemes(state: str = "India") -> str:
     """Retrieves information on agricultural government schemes and subsidies."""
     schemes = [
@@ -148,7 +142,6 @@ def get_government_schemes(state: str = "India") -> str:
     return f"Active Government Schemes for {state}: " + " | ".join(schemes)
 
 
-@traceable(name="gemini_fallback", tags=["fallback", "llm"])
 def get_gemini_fallback(query: str) -> tuple[str, str]:
     """Call Gemini API directly when tools don't find answers."""
     try:
@@ -167,7 +160,6 @@ def get_gemini_fallback(query: str) -> tuple[str, str]:
         return f"Unable to generate answer: {str(e)}", "error"
 
 
-# ── Register tools ────────────────────────────────────────────
 pest_simulation_tool = StructuredTool.from_function(
     func=simulate_pests,
     name="simulate_pests",
@@ -186,11 +178,7 @@ TOOLS = [pest_simulation_tool, government_schemes_tool]
 class State(TypedDict):
     messages: Annotated[list, add_messages]
 
-llm_agent = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
-    temperature=0,
-    google_api_key=GOOGLE_API_KEY,
-)
+llm_agent      = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0, google_api_key=GOOGLE_API_KEY)
 llm_with_tools = llm_agent.bind_tools(TOOLS, tool_choice="auto")
 
 def agent_node(state: State):
@@ -241,7 +229,6 @@ def extract_final_answer(result: dict) -> str:
 def clean_response_text(text: str) -> str:
     if not text:
         return ""
-    import re
     text = re.sub(r'```[\s\S]*?```', '', text)
     text = re.sub(r'`([^`]+)`', r'\1', text)
     text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
@@ -299,63 +286,50 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
     return {"status": "ok"}
 
 # ============================================================
-# MAIN CHAT ENDPOINT — LangSmith tracing via @traceable
+# MAIN CHAT ENDPOINT
 # ============================================================
-@traceable(
-    name="agrigpt_chat",
-    tags=["chat", "production"]
-)
-def run_agent_with_tracing(message: str, chat_id: str, phone_number: str):
-    """Core agent logic — fully traced by LangSmith via @traceable."""
+@app.post("/test/chat", response_model=ChatResponse)
+def test_chat(request: ChatRequest, _ = Depends(verify_api_key)):
+    """
+    Chat endpoint — LangSmith traces automatically via LANGCHAIN_TRACING_V2=true.
+    Every LangGraph run, LLM call, and tool call is captured without decorators.
+    """
     global global_tool_results
     global_tool_results = []
 
-    history = load_history(chat_id)
-    history = [m for m in history if not isinstance(m, SystemMessage)]
-    history = [SystemMessage(content="""You are AgriGPT, an agricultural assistant.
+    print(f"\n[chat] chatId={request.chatId} | msg={request.message[:60]}")
+
+    try:
+        history = load_history(request.chatId)
+        history = [m for m in history if not isinstance(m, SystemMessage)]
+        history = [SystemMessage(content="""You are AgriGPT, an agricultural assistant.
 Use simulate_pests for pest/disease questions.
 Use government_schemes for subsidy/scheme questions.
 Write in PLAIN TEXT only.""")] + history
-    history.append(HumanMessage(content=message))
+        history.append(HumanMessage(content=request.message))
 
-    result    = app_agent.invoke({"messages": history})
-    final_ans = extract_final_answer(result)
-    save_history(chat_id, result["messages"])
+        # This entire invoke is auto-traced by LangSmith
+        result    = app_agent.invoke({"messages": history})
+        final_ans = extract_final_answer(result)
+        save_history(request.chatId, result["messages"])
 
-    if has_meaningful_results(global_tool_results):
-        sources       = list({t["tool"] for t in global_tool_results}) or ["Knowledge Base"]
-        used_fallback = False
-    else:
-        gemini_ans, status = get_gemini_fallback(message)
-        final_ans     = f"Based on general agricultural knowledge:\n\n{gemini_ans}" if status == "success" else f"Could not retrieve: {gemini_ans}"
-        sources       = ["Gemini API"] if status == "success" else ["Error"]
-        used_fallback = True
+        if has_meaningful_results(global_tool_results):
+            sources = list({t["tool"] for t in global_tool_results}) or ["Knowledge Base"]
+        else:
+            gemini_ans, status = get_gemini_fallback(request.message)
+            final_ans = f"Based on general agricultural knowledge:\n\n{gemini_ans}" if status == "success" else f"Could not retrieve: {gemini_ans}"
+            sources   = ["Gemini API"] if status == "success" else ["Error"]
 
-    cleaned = clean_response_text(final_ans)
+        cleaned = clean_response_text(final_ans)
+        print(f"[chat] sources={sources}")
 
-    return {
-        "response": cleaned,
-        "sources":  sources,
-        "used_fallback": used_fallback
-    }
-
-
-@app.post("/test/chat", response_model=ChatResponse)
-def test_chat(request: ChatRequest, _ = Depends(verify_api_key)):
-    """Chat endpoint — protected by X-API-Key."""
-    print(f"\n[chat] chatId={request.chatId} | msg={request.message[:60]}")
-    try:
-        output = run_agent_with_tracing(
-            message=request.message,
-            chat_id=request.chatId,
-            phone_number=request.phone_number
-        )
         return ChatResponse(
             chatId=request.chatId,
             phone_number=request.phone_number,
-            response=output["response"],
-            sources=output["sources"],
+            response=cleaned,
+            sources=sources,
         )
+
     except Exception as exc:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(exc))
@@ -365,7 +339,6 @@ def test_chat(request: ChatRequest, _ = Depends(verify_api_key)):
 def chat(request: ChatRequest, _ = Depends(verify_api_key)):
     """Production chat endpoint."""
     return test_chat(request)
-
 
 # ============================================================
 # ENTRY POINT
