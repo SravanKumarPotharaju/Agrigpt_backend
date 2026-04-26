@@ -6,7 +6,6 @@ Full observability with LangSmith tracing
 import os
 import json
 import traceback
-import langsmith
 from typing import Annotated, TypedDict, List, Dict, Any
 
 from fastapi import FastAPI, HTTPException, Depends, Security, Request, Query, BackgroundTasks
@@ -29,9 +28,9 @@ from langsmith.run_helpers import traceable
 # ============================================================
 load_dotenv()
 
-GOOGLE_API_KEY     = os.getenv("GOOGLE_API_KEY", "")
-API_KEY            = os.getenv("API_KEY", "")
-langsmith_api_key  = os.getenv("LANGSMITH_API_KEY", "")
+GOOGLE_API_KEY    = os.getenv("GOOGLE_API_KEY", "")
+API_KEY           = os.getenv("API_KEY", "")
+langsmith_api_key = os.getenv("LANGSMITH_API_KEY", "")
 
 # ── LangSmith setup ──────────────────────────────────────────
 if langsmith_api_key:
@@ -39,16 +38,15 @@ if langsmith_api_key:
     os.environ["LANGCHAIN_ENDPOINT"]   = "https://api.smith.langchain.com"
     os.environ["LANGCHAIN_API_KEY"]    = langsmith_api_key
     os.environ["LANGCHAIN_PROJECT"]    = os.getenv("LANGCHAIN_PROJECT", "agrigpt-backend-agent")
-    print(f"[LangSmith] Tracing enabled → project: {os.environ['LANGCHAIN_PROJECT']}")
+    print(f"[LangSmith] Tracing enabled -> project: {os.environ['LANGCHAIN_PROJECT']}")
 else:
-    print("[LangSmith] No API key found — tracing disabled")
+    print("[LangSmith] No API key — tracing disabled")
 
 # ============================================================
 # FastAPI App
 # ============================================================
 app = FastAPI(title="AgriGPT Agent")
 
-# ── CORS ─────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -56,25 +54,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── API Key Auth ──────────────────────────────────────────────
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 async def verify_api_key(key: str = Security(api_key_header)):
     if API_KEY and key != API_KEY:
         raise HTTPException(status_code=403, detail="Invalid or missing API Key")
 
-# ── LangSmith Client ──────────────────────────────────────────
 ls_client = Client() if langsmith_api_key else None
 
 # ============================================================
-# GLOBAL TOOL STORAGE
+# GLOBAL TOOL STORAGE & HISTORY
 # ============================================================
 global_tool_results: List[Dict[str, Any]] = []
-
-# ============================================================
-# IN-MEMORY CHAT HISTORY
-# ============================================================
-in_memory_history = {}
+in_memory_history: Dict[str, list] = {}
 
 def load_history(chat_id: str) -> list:
     return in_memory_history.get(chat_id, [])
@@ -123,7 +115,7 @@ def simulate_pests(crop_name: str, location: str = "general") -> str:
     }
     result = pest_data.get(
         crop_name.lower(),
-        f"No specific pest simulation data for {crop_name}. Advice: Monitor regularly for unusual leaf patterns or insects."
+        f"No specific pest data for {crop_name}. Monitor regularly for unusual leaf patterns or insects."
     )
     return f"Pest Simulation Results for {crop_name} in {location}: {result}"
 
@@ -134,27 +126,24 @@ def get_government_schemes(state: str = "India") -> str:
     schemes = [
         "PM-KISAN: Financial support of Rs.6,000 per year to small and marginal farmers.",
         "PM Fasal Bima Yojana: Affordable crop insurance for farmers against natural calamities.",
-        "Soil Health Card Scheme: Helps farmers understand soil nutrient status and recommended dosage of fertilizers.",
-        "Kisan Credit Card (KCC): Provides timely credit to farmers for their cultivation and other needs.",
-        "Agriculture Infrastructure Fund (AIF): Rs.1 lakh crore financing facility for post-harvest infrastructure.",
-        "PM Kisan Samman Nidhi: Direct income support transferred directly to bank accounts of eligible farmer families.",
-        "National Agricultural Market (eNAM): Online trading platform linking APMCs for better price discovery.",
-        "Pradhan Mantri Krishi Sinchayee Yojana (PMKSY): Ensures Har Khet Ko Pani and promotes micro-irrigation.",
-        "Per Drop More Crop: Promotes drip and sprinkler irrigation systems with subsidy up to 55% for small farmers.",
+        "Soil Health Card Scheme: Helps farmers understand soil nutrient status.",
+        "Kisan Credit Card (KCC): Provides timely credit to farmers for cultivation needs.",
+        "Agriculture Infrastructure Fund (AIF): Rs.1 lakh crore financing for post-harvest infrastructure.",
+        "National Agricultural Market (eNAM): Online trading platform for better price discovery.",
+        "Pradhan Mantri Krishi Sinchayee Yojana (PMKSY): Promotes micro-irrigation for water efficiency.",
+        "Per Drop More Crop: Drip and sprinkler irrigation with subsidy up to 55% for small farmers.",
         "Paramparagat Krishi Vikas Yojana (PKVY): Promotes organic farming with Rs.50,000/hectare support.",
-        "Rashtriya Krishi Vikas Yojana (RKVY): Holistic development of agriculture with state-specific plans.",
-        "Digital Agriculture Mission: Promotes AI, IoT, and remote sensing in agriculture for precision farming.",
-        "National Food Security Mission (NFSM): Increases production of rice, wheat, pulses, and coarse cereals.",
-        "Mission for Integrated Development of Horticulture (MIDH): Promotes holistic growth of horticulture.",
-        "Interest Subvention Scheme: Provides short-term crop loans up to Rs.3 lakh at 7% interest rate.",
-        "Pradhan Mantri Kisan MaanDhan Yojana (PM-KMY): Pension scheme providing Rs.3,000/month after age 60.",
-        "Pradhan Mantri Matsya Sampada Yojana (PMMSY): Rs.20,000 crore scheme for fisheries sector.",
-        "Rashtriya Gokul Mission: Conserves and develops indigenous bovine breeds for higher milk productivity.",
-        "National Beekeeping and Honey Mission (NBHM): Promotes scientific beekeeping for additional income.",
-        "Rythu Bandhu (Telangana): Investment support of Rs.10,000 per acre per year to all farming land owners.",
-        "Rythu Bima (Telangana): Free life insurance of Rs.5 lakh to all farmers in Telangana aged 18-59 years.",
-        "Mission Kakatiya (Telangana): Restoration of tanks and minor irrigation sources across Telangana.",
-        "Telangana Micro Irrigation Project: Promotes drip and sprinkler irrigation with 100% subsidy."
+        "Rashtriya Krishi Vikas Yojana (RKVY): Holistic agriculture development with flexible funding.",
+        "Digital Agriculture Mission: Promotes AI, IoT, and remote sensing for precision farming.",
+        "National Food Security Mission (NFSM): Increases production of rice, wheat, and pulses.",
+        "Interest Subvention Scheme: Crop loans up to Rs.3 lakh at 7% interest rate.",
+        "Pradhan Mantri Kisan MaanDhan Yojana: Pension of Rs.3,000/month to farmers after age 60.",
+        "Pradhan Mantri Matsya Sampada Yojana: Rs.20,000 crore scheme for fisheries sector.",
+        "Rashtriya Gokul Mission: Develops indigenous bovine breeds for higher milk productivity.",
+        "Rythu Bandhu (Telangana): Rs.10,000 per acre per year to farming land owners.",
+        "Rythu Bima (Telangana): Free life insurance of Rs.5 lakh to farmers aged 18-59.",
+        "Mission Kakatiya (Telangana): Restoration of tanks and minor irrigation sources.",
+        "Telangana Micro Irrigation Project: 100% subsidy for drip and sprinkler irrigation."
     ]
     return f"Active Government Schemes for {state}: " + " | ".join(schemes)
 
@@ -162,22 +151,19 @@ def get_government_schemes(state: str = "India") -> str:
 @traceable(name="gemini_fallback", tags=["fallback", "llm"])
 def get_gemini_fallback(query: str) -> tuple[str, str]:
     """Call Gemini API directly when tools don't find answers."""
-    print(f"[gemini_fallback] Calling Gemini for: {query[:60]}")
     try:
-        llm = ChatGoogleGenerativeAI(
+        llm_fb = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
             temperature=0.7,
             google_api_key=GOOGLE_API_KEY,
         )
-        response = llm.invoke([
-            SystemMessage(content="You are an expert agricultural assistant. Provide clear, detailed answers about agriculture, crops, pests, and farming practices."),
+        response = llm_fb.invoke([
+            SystemMessage(content="You are an expert agricultural assistant."),
             HumanMessage(content=query)
         ])
         answer = response.content if hasattr(response, "content") else str(response)
-        print(f"[gemini_fallback] Got answer ({len(answer)} chars)")
         return answer, "success"
     except Exception as e:
-        print(f"[gemini_fallback] Error: {e}")
         return f"Unable to generate answer: {str(e)}", "error"
 
 
@@ -187,61 +173,49 @@ pest_simulation_tool = StructuredTool.from_function(
     name="simulate_pests",
     description="Simulates pest and disease activity for a given crop and location."
 )
-
 government_schemes_tool = StructuredTool.from_function(
     func=get_government_schemes,
     name="government_schemes",
     description="Retrieves information on agricultural government schemes and subsidies."
 )
-
 TOOLS = [pest_simulation_tool, government_schemes_tool]
 
 # ============================================================
-# LANGGRAPH STATE & AGENT
+# LANGGRAPH AGENT
 # ============================================================
 class State(TypedDict):
     messages: Annotated[list, add_messages]
 
-
-llm = ChatGoogleGenerativeAI(
+llm_agent = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     temperature=0,
     google_api_key=GOOGLE_API_KEY,
 )
-llm_with_tools = llm.bind_tools(TOOLS, tool_choice="auto")
-
+llm_with_tools = llm_agent.bind_tools(TOOLS, tool_choice="auto")
 
 def agent_node(state: State):
     return {"messages": [llm_with_tools.invoke(state["messages"])]}
-
 
 def should_continue(state: State):
     last = state["messages"][-1]
     return "tools" if (hasattr(last, "tool_calls") and last.tool_calls) else END
 
-
 def tool_node(state: State):
     global global_tool_results
-    last = state["messages"][-1]
+    last    = state["messages"][-1]
     outputs = []
-
     for call in last.tool_calls:
         name    = call["name"]
         args    = call.get("args", {})
         tool_id = call.get("id", "")
-
-        tool   = next((t for t in TOOLS if t.name == name), None)
-        result = tool.invoke(args) if tool else f"Tool {name} not found"
-
+        tool    = next((t for t in TOOLS if t.name == name), None)
+        result  = tool.invoke(args) if tool else f"Tool {name} not found"
         global_tool_results.append({"tool": name, "result": result})
         outputs.append(ToolMessage(content=str(result), tool_call_id=tool_id, name=name))
-
     return {"messages": outputs}
 
-
-# ── Build graph ───────────────────────────────────────────────
 print("\nBUILDING AGENT...")
-workflow = StateGraph(State)
+workflow  = StateGraph(State)
 workflow.add_node("agent", agent_node)
 workflow.add_node("tools", tool_node)
 workflow.add_edge(START, "agent")
@@ -250,9 +224,8 @@ workflow.add_edge("tools", "agent")
 app_agent = workflow.compile()
 print("AGENT READY\n")
 
-
 # ============================================================
-# HELPER FUNCTIONS
+# HELPERS
 # ============================================================
 def extract_final_answer(result: dict) -> str:
     for msg in reversed(result["messages"]):
@@ -264,7 +237,6 @@ def extract_final_answer(result: dict) -> str:
                 if isinstance(block, dict) and block.get("text", "").strip():
                     return block["text"]
     return "No response generated."
-
 
 def clean_response_text(text: str) -> str:
     if not text:
@@ -282,14 +254,12 @@ def clean_response_text(text: str) -> str:
         text = text.split("Sources:")[0]
     return text.strip()
 
-
 def has_meaningful_results(tool_results):
     for tr in tool_results:
         result = tr.get("result", "")
         if isinstance(result, str) and len(result.strip()) > 10:
             return True
     return False
-
 
 # ============================================================
 # MODELS
@@ -305,14 +275,12 @@ class ChatResponse(BaseModel):
     response:     str
     sources:      List[str] = []
 
-
 # ============================================================
 # ROUTES
 # ============================================================
 @app.get("/hi", tags=["Health"])
 async def hi():
     return {"message": "Hi from AgriGPT!"}
-
 
 @app.get("/webhook")
 async def verify_webhook(
@@ -324,90 +292,73 @@ async def verify_webhook(
         return PlainTextResponse(content=hub_challenge, status_code=200)
     raise HTTPException(status_code=403, detail="Webhook verification failed.")
 
-
 @app.post("/webhook")
 async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
     payload = await request.json()
     print(f"[Webhook] Payload: {payload}")
     return {"status": "ok"}
 
+# ============================================================
+# MAIN CHAT ENDPOINT — LangSmith tracing via @traceable
+# ============================================================
+@traceable(
+    name="agrigpt_chat",
+    tags=["chat", "production"]
+)
+def run_agent_with_tracing(message: str, chat_id: str, phone_number: str):
+    """Core agent logic — fully traced by LangSmith via @traceable."""
+    global global_tool_results
+    global_tool_results = []
 
-# ============================================================
-# MAIN CHAT ENDPOINT WITH LANGSMITH TRACING
-# ============================================================
+    history = load_history(chat_id)
+    history = [m for m in history if not isinstance(m, SystemMessage)]
+    history = [SystemMessage(content="""You are AgriGPT, an agricultural assistant.
+Use simulate_pests for pest/disease questions.
+Use government_schemes for subsidy/scheme questions.
+Write in PLAIN TEXT only.""")] + history
+    history.append(HumanMessage(content=message))
+
+    result    = app_agent.invoke({"messages": history})
+    final_ans = extract_final_answer(result)
+    save_history(chat_id, result["messages"])
+
+    if has_meaningful_results(global_tool_results):
+        sources       = list({t["tool"] for t in global_tool_results}) or ["Knowledge Base"]
+        used_fallback = False
+    else:
+        gemini_ans, status = get_gemini_fallback(message)
+        final_ans     = f"Based on general agricultural knowledge:\n\n{gemini_ans}" if status == "success" else f"Could not retrieve: {gemini_ans}"
+        sources       = ["Gemini API"] if status == "success" else ["Error"]
+        used_fallback = True
+
+    cleaned = clean_response_text(final_ans)
+
+    return {
+        "response": cleaned,
+        "sources":  sources,
+        "used_fallback": used_fallback
+    }
+
+
 @app.post("/test/chat", response_model=ChatResponse)
 def test_chat(request: ChatRequest, _ = Depends(verify_api_key)):
-    global global_tool_results
-
-    print(f"\n[chat] START | chatId={request.chatId} | msg={request.message[:60]}")
-
-    with langsmith.trace(
-        name="agrigpt_chat",
-        project_name=os.getenv("LANGCHAIN_PROJECT", "agrigpt-backend-agent"),
-        metadata={
-            "chatId":       request.chatId,
-            "phone_number": request.phone_number,
-            "message_len":  len(request.message),
-        },
-        tags=["chat", "production"]
-    ) as run:
-        try:
-            global_tool_results = []
-
-            # Load history
-            history = load_history(request.chatId)
-            history = [m for m in history if not isinstance(m, SystemMessage)]
-            history = [SystemMessage(content="""You are AgriGPT, an agricultural assistant.
-Use 'simulate_pests' for pest/disease questions.
-Use 'government_schemes' for subsidy/scheme questions.
-Write in PLAIN TEXT only.""")] + history
-            history.append(HumanMessage(content=request.message))
-
-            # Run agent
-            result     = app_agent.invoke({"messages": history})
-            final_ans  = extract_final_answer(result)
-            save_history(request.chatId, result["messages"])
-
-            # Determine sources
-            if has_meaningful_results(global_tool_results):
-                sources = list({t["tool"] for t in global_tool_results}) or ["Knowledge Base"]
-                used_fallback = False
-            else:
-                gemini_ans, status = get_gemini_fallback(request.message)
-                final_ans     = f"Based on general agricultural knowledge:\n\n{gemini_ans}" if status == "success" else f"Could not retrieve information: {gemini_ans}"
-                sources       = ["Gemini API"] if status == "success" else ["Error"]
-                used_fallback = True
-
-            cleaned = clean_response_text(final_ans)
-
-            # Log metadata to LangSmith
-            if run:
-                run.metadata["sources"]       = sources
-                run.metadata["used_fallback"]  = used_fallback
-                run.metadata["response_len"]   = len(cleaned)
-
-            # Log feedback to LangSmith
-            if ls_client and run:
-                ls_client.create_feedback(
-                    run.id,
-                    key="has_sources",
-                    score=1.0 if sources and sources != ["Gemini API"] else 0.0,
-                )
-
-            print(f"[chat] END | sources={sources}")
-
-            return ChatResponse(
-                chatId=request.chatId,
-                phone_number=request.phone_number,
-                response=cleaned,
-                sources=sources,
-            )
-
-        except Exception as exc:
-            if run:
-                run.metadata["error"] = str(exc)
-            traceback.print_exc()
-            raise HTTPException(status_code=500, detail=str(exc))
+    """Chat endpoint — protected by X-API-Key."""
+    print(f"\n[chat] chatId={request.chatId} | msg={request.message[:60]}")
+    try:
+        output = run_agent_with_tracing(
+            message=request.message,
+            chat_id=request.chatId,
+            phone_number=request.phone_number
+        )
+        return ChatResponse(
+            chatId=request.chatId,
+            phone_number=request.phone_number,
+            response=output["response"],
+            sources=output["sources"],
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/chat", response_model=ChatResponse)
