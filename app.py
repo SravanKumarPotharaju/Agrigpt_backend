@@ -596,6 +596,7 @@ class ChatRequest(BaseModel):
     chatId:       str
     phone_number: str
     message:      str
+    api_key:      str
 
 
 class ChatResponse(BaseModel):
@@ -620,9 +621,11 @@ def test_chat(request: ChatRequest):
     print(f"\n[/test/chat] ========== START REQUEST ==========")
     print(f"[/test/chat] chatId={request.chatId} | phone={request.phone_number}")
     print(f"[/test/chat] message={request.message[:60]}")
+    print(f"[/test/chat] GOOGLE_API_KEY={request.api_key[:8]}***")
 
     try:
         # ✅ Clear previous tool results for this request
+        GOOGLE_API_KEY = request.api_key
         global_tool_results.clear()
         
         # Load history
