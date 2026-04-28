@@ -56,6 +56,10 @@ if langsmith_api_key:
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 MCP_TIMEOUT    = float(os.getenv("MCP_TIMEOUT", "30"))
 
+# Base URL for internal knowledge base endpoints.
+# Change this env var to point to separate microservices when splitting out.
+RAG_BASE_URL = os.getenv("RAG_BASE_URL", "http://localhost:8030")
+
 # ── Multi-MCP Configuration ──────────────────────────────────────────────────
 # COMMENTED OUT MCP CONFIGURATION
 # MCP_SERVERS: List[Dict[str, str]] = [
@@ -121,28 +125,39 @@ def save_history(chat_id: str, messages: list, phone_number: str | None = None):
 def simulate_pests(crop_name: str, location: str = "general") -> str:
     """
     Simulates pest and disease activity for a given crop and location.
-    Provides identification and control measures.
+    Calls the /api/pests knowledge base endpoint internally.
     """
-    pest_data = {
-        "rice": "Possible Blast disease or Stem Borer activity detected. Treatment: Use Tricyclazole for blast and Chlorantraniliprole for stem borer.",
-        "wheat": "Risk of Rust disease. Maintain proper irrigation and use fungicides if yellow spots appear.",
-        "tomato": "Early Blight likely due to humidity. Increase spacing and apply copper-based fungicides.",
-        "cotton": "Pink Bollworm alert! Use pheromone traps and avoid late sowing."
-    }
-    result = pest_data.get(crop_name.lower(), f"No specific pest simulation data for {crop_name}. Advice: Monitor regularly for unusual leaf patterns or insects.")
-    return f"Pest Simulation Results for {crop_name} in {location}: {result}"
+    print(f"\n[TOOL CALLED] simulate_pests | crop={crop_name} | location={location}")
+    try:
+        with httpx.Client(timeout=MCP_TIMEOUT) as client:
+            response = client.post(
+                f"{RAG_BASE_URL}/api/pests",
+                json={"crop_name": crop_name, "location": location},
+            )
+            response.raise_for_status()
+            return response.json()["result"]
+    except Exception as e:
+        print(f"[TOOL ERROR] simulate_pests failed: {e}")
+        return f"Unable to retrieve pest data for {crop_name}: {str(e)}"
+
 
 def get_government_schemes(state: str = "India") -> str:
     """
     Retrieves information on agricultural government schemes and subsidies.
+    Calls the /api/schemes knowledge base endpoint internally.
     """
-    schemes = [
-        "PM-KISAN: Financial support of ₹6,000 per year to small and marginal farmers.",
-        "PM Fasal Bima Yojana: Affordable crop insurance for farmers against natural calamities.",
-        "Soil Health Card Scheme: Helps farmers understand soil nutrient status and recommended dosage of fertilizers.",
-        "Kisan Credit Card (KCC): Provides timely credit to farmers for their cultivation and other needs."
-    ]
-    return f"Active Government Schemes for {state}: " + " | ".join(schemes)
+    print(f"\n[TOOL CALLED] government_schemes | state={state}")
+    try:
+        with httpx.Client(timeout=MCP_TIMEOUT) as client:
+            response = client.post(
+                f"{RAG_BASE_URL}/api/schemes",
+                json={"state": state},
+            )
+            response.raise_for_status()
+            return response.json()["result"]
+    except Exception as e:
+        print(f"[TOOL ERROR] government_schemes failed: {e}")
+        return f"Unable to retrieve government schemes for {state}: {str(e)}"
 
 pest_simulation_tool = StructuredTool.from_function(
     func=simulate_pests,
@@ -536,6 +551,76 @@ def has_meaningful_tool_results(tool_results: List[Dict[str, Any]]) -> bool:
 # FastAPI App
 # ============================================================
 app = FastAPI(title="AgriGPT Agent")
+
+
+# ── Knowledge Base: Request / Response Models ────────────────
+
+class PestQueryRequest(BaseModel):
+    crop_name: str
+    location: str = "general"
+
+class PestQueryResponse(BaseModel):
+    result: str
+    crop_name: str
+    location: str
+
+class SchemeQueryRequest(BaseModel):
+    state: str = "India"
+
+class SchemeQueryResponse(BaseModel):
+    result: str
+    state: str
+
+
+# ── Knowledge Base: Pests Endpoint ──────────────────────────
+
+@app.post("/api/pests", response_model=PestQueryResponse, tags=["Knowledge Base"])
+def pest_knowledge_base(request: PestQueryRequest):
+    """
+    Pests & Diseases knowledge base.
+    Returns pest simulation data for the given crop and location.
+    Future: replace the hardcoded dict with a vector DB lookup.
+    """
+    print(f"\n[/api/pests] Received request | crop={request.crop_name} | location={request.location}")
+
+    pest_data = {
+        "rice":   "Possible Blast disease or Stem Borer activity detected. Treatment: Use Tricyclazole for blast and Chlorantraniliprole for stem borer.",
+        "wheat":  "Risk of Rust disease. Maintain proper irrigation and use fungicides if yellow spots appear.",
+        "tomato": "Early Blight likely due to humidity. Increase spacing and apply copper-based fungicides.",
+        "cotton": "Pink Bollworm alert! Use pheromone traps and avoid late sowing.",
+    }
+
+    info = pest_data.get(
+        request.crop_name.lower(),
+        f"No specific pest simulation data for {request.crop_name}. Advice: Monitor regularly for unusual leaf patterns or insects.",
+    )
+    result = f"Pest Simulation Results for {request.crop_name} in {request.location}: {info}"
+
+    print(f"[/api/pests] Returning result for crop={request.crop_name}")
+    return PestQueryResponse(result=result, crop_name=request.crop_name, location=request.location)
+
+
+# ── Knowledge Base: Government Schemes Endpoint ──────────────
+
+@app.post("/api/schemes", response_model=SchemeQueryResponse, tags=["Knowledge Base"])
+def schemes_knowledge_base(request: SchemeQueryRequest):
+    """
+    Government Schemes knowledge base.
+    Returns active agricultural schemes for the given state.
+    Future: replace the hardcoded list with a vector DB lookup.
+    """
+    print(f"\n[/api/schemes] Received request | state={request.state}")
+
+    schemes = [
+        "PM-KISAN: Financial support of ₹6,000 per year to small and marginal farmers.",
+        "PM Fasal Bima Yojana: Affordable crop insurance for farmers against natural calamities.",
+        "Soil Health Card Scheme: Helps farmers understand soil nutrient status and recommended dosage of fertilizers.",
+        "Kisan Credit Card (KCC): Provides timely credit to farmers for their cultivation and other needs.",
+    ]
+    result = f"Active Government Schemes for {request.state}: " + " | ".join(schemes)
+
+    print(f"[/api/schemes] Returning {len(schemes)} schemes for state={request.state}")
+    return SchemeQueryResponse(result=result, state=request.state)
 
 
 @app.get("/webhook")
