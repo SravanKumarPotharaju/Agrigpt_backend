@@ -36,7 +36,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langchain_core.tools import StructuredTool
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 
 from pymongo import MongoClient, ASCENDING
 from pymongo.collection import Collection
@@ -53,8 +53,10 @@ if langsmith_api_key:
     os.environ["LANGCHAIN_API_KEY"]    = langsmith_api_key
     os.environ["LANGCHAIN_PROJECT"]    = "agrigpt-backend-agent"
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-MCP_TIMEOUT    = float(os.getenv("MCP_TIMEOUT", "30"))
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://3.109.63.164/v1")
+OLLAMA_API_KEY  = os.getenv("OLLAMA_API_KEY",  "apiuser1:admin@123")
+OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL",     "gemma4:26b")
+MCP_TIMEOUT     = float(os.getenv("MCP_TIMEOUT", "30"))
 
 # Base URL for internal knowledge base endpoints.
 # Change this env var to point to separate microservices when splitting out.
@@ -194,10 +196,11 @@ def build_agent():
     all_tools = [pest_simulation_tool, government_schemes_tool]
 
     # LLM
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
+    llm = ChatOpenAI(
+        model=OLLAMA_MODEL,
+        base_url=OLLAMA_BASE_URL,
+        api_key=OLLAMA_API_KEY,
         temperature=0,
-        google_api_key=GOOGLE_API_KEY,
     )
     llm_with_tools = llm.bind_tools(all_tools, tool_choice="auto")
 
@@ -318,26 +321,27 @@ print("AGENT BUILD COMPLETE\n")
 # Gemini Fallback Handler
 # ============================================================
 def get_gemini_fallback(query: str) -> tuple[str, str]:
-    """Call Gemini API directly when tools don't find answers."""
-    print(f"[gemini_fallback] Calling Gemini for query: {query[:60]}")
+    """Call LLM directly when tools don't find answers."""
+    print(f"[llm_fallback] Calling {OLLAMA_MODEL} for query: {query[:60]}")
     try:
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+        llm = ChatOpenAI(
+            model=OLLAMA_MODEL,
+            base_url=OLLAMA_BASE_URL,
+            api_key=OLLAMA_API_KEY,
             temperature=0.7,
-            google_api_key=GOOGLE_API_KEY,
         )
-        
+
         response = llm.invoke([
-            SystemMessage(content="You are an expert agricultural assistant. Provide clear, detailed answers about agriculture, crops, pests, and farming practices."),
+            SystemMessage(content="You are an expert agricultural assistant. Only answer questions related to agriculture, crops, pests, diseases, and farming. For unrelated questions, politely say you only handle agriculture topics."),
             HumanMessage(content=query)
         ])
-        
+
         answer = response.content if hasattr(response, 'content') else str(response)
-        print(f"[gemini_fallback] ✓ Got answer from Gemini ({len(answer)} chars)")
+        print(f"[llm_fallback] ✓ Got answer ({len(answer)} chars)")
         return answer, "success"
-    
+
     except Exception as e:
-        print(f"[gemini_fallback] ✗ Error calling Gemini: {e}")
+        print(f"[llm_fallback] ✗ Error: {e}")
         return f"Unable to generate answer: {str(e)}", "error"
 
 
@@ -407,14 +411,12 @@ def extract_sources_from_tool_results(tool_results: List[Dict[str, Any]]) -> Lis
                     print(f"    → {tool_name} (no specific source found)")
             continue
         
-        # Handle stringified JSON (fallback, but shouldn't be needed with global capture)
+        # String results — tool ran successfully, use tool name as source
         if isinstance(result_data, str):
-            print(f"[extract_sources] {tool_name}: Result is string, parsing JSON...")
-            try:
-                result_data = json.loads(result_data)
-            except:
-                print(f"[extract_sources] {tool_name}: Could not parse, skipping")
-                continue
+            if len(result_data.strip()) > 10:
+                sources.add(tool_name)
+                print(f"[extract_sources] {tool_name}: String result → source={tool_name}")
+            continue
         
         if not isinstance(result_data, dict):
             continue
@@ -681,6 +683,7 @@ class ChatRequest(BaseModel):
     chatId:       str
     phone_number: str
     message:      str
+    api_key:      str = ""   # accepted for compatibility, not used (Ollama creds are built-in)
 
 
 class ChatResponse(BaseModel):
