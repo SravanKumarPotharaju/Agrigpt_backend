@@ -6,7 +6,7 @@ LangSmith observability via LANGCHAIN_TRACING_V2 (auto-tracing)
 import os
 import re
 import traceback
-from typing import Annotated, TypedDict, List, Dict, Any
+from typing import Annotated, TypedDict, List, Dict, Any, Union
 
 from fastapi import FastAPI, HTTPException, Depends, Security, Request, Query, BackgroundTasks
 from fastapi.security.api_key import APIKeyHeader
@@ -227,77 +227,82 @@ class SchemeQueryResponse(BaseModel):
 # KNOWLEDGE BASE ENDPOINTS  (Microservices per architecture)
 # ============================================================
 
-@app.get("/knowledge-base/pests", tags=["Knowledge Base"])
-def list_all_pests():
-    """Returns all crops available in the Pests Knowledge Base."""
-    return {
-        "available_crops": sorted(PESTS_KNOWLEDGE_BASE.keys()),
-        "total": len(PESTS_KNOWLEDGE_BASE),
-        "source": "Pests Knowledge Base",
-    }
+@app.get("/knowledge-base/{domain}", tags=["Knowledge Base"])
+def list_knowledge_base(domain: str):
+    """Unified endpoint to list all items available in a specific Knowledge Base."""
+    if domain.lower() == "pests":
+        return {
+            "available_crops": sorted(PESTS_KNOWLEDGE_BASE.keys()),
+            "total": len(PESTS_KNOWLEDGE_BASE),
+            "source": "Pests Knowledge Base",
+        }
+    elif domain.lower() == "schemes":
+        return {
+            "available_schemes": sorted(SCHEMES_KNOWLEDGE_BASE.keys()),
+            "categories": sorted({v["category"] for v in SCHEMES_KNOWLEDGE_BASE.values()}),
+            "total": len(SCHEMES_KNOWLEDGE_BASE),
+            "source": "Schemes Knowledge Base",
+        }
+    raise HTTPException(status_code=404, detail=f"Knowledge base '{domain}' not found. Use 'pests' or 'schemes'.")
 
-@app.post("/knowledge-base/pests/query", response_model=PestQueryResponse, tags=["Knowledge Base"])
-def query_pests_knowledge_base(request: PestQueryRequest):
+@app.post("/knowledge-base/{domain}/query", response_model=Union[PestQueryResponse, SchemeQueryResponse], tags=["Knowledge Base"])
+def query_knowledge_base(domain: str, payload: Dict[str, Any]):
     """
-    Microservice endpoint — Pests Knowledge Base.
-    Returns pest, disease, and treatment data for a given crop.
-    Called internally by Tool 2 (simulate_pests).
+    Unified endpoint to query a specific Knowledge Base.
+    Called internally by Tool 1 (government_schemes) and Tool 2 (simulate_pests).
     """
-    crop_key = request.crop_name.strip().lower()
-    data = PESTS_KNOWLEDGE_BASE.get(crop_key)
-    if not data:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No pest data found for crop '{request.crop_name}'. "
-                   f"Available crops: {sorted(PESTS_KNOWLEDGE_BASE.keys())}",
+    if domain.lower() == "pests":
+        try:
+            request = PestQueryRequest(**payload)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Invalid payload for pests query: {e}")
+            
+        crop_key = request.crop_name.strip().lower()
+        data = PESTS_KNOWLEDGE_BASE.get(crop_key)
+        if not data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No pest data found for crop '{request.crop_name}'. "
+                       f"Available crops: {sorted(PESTS_KNOWLEDGE_BASE.keys())}",
+            )
+        return PestQueryResponse(
+            crop_name=request.crop_name,
+            location=request.location,
+            pests=data["pests"],
+            diseases=data["diseases"],
+            treatment=data["treatment"],
         )
-    return PestQueryResponse(
-        crop_name=request.crop_name,
-        location=request.location,
-        pests=data["pests"],
-        diseases=data["diseases"],
-        treatment=data["treatment"],
-    )
+        
+    elif domain.lower() == "schemes":
+        try:
+            request = SchemeQueryRequest(**payload)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Invalid payload for schemes query: {e}")
+            
+        results = []
+        for scheme_id, details in SCHEMES_KNOWLEDGE_BASE.items():
+            # Simple state filter: Telangana-specific schemes are flagged in full_name
+            if request.state.lower() not in ("india", "") and \
+               "telangana" in details["full_name"].lower() and \
+               "telangana" not in request.state.lower():
+                continue
+            if request.category and details["category"].lower() != request.category.lower():
+                continue
+            results.append(SchemeDetail(
+                scheme_id=scheme_id,
+                full_name=details["full_name"],
+                benefit=details["benefit"],
+                eligibility=details["eligibility"],
+                category=details["category"],
+            ))
 
-@app.get("/knowledge-base/schemes", tags=["Knowledge Base"])
-def list_all_schemes():
-    """Returns all scheme IDs available in the Schemes Knowledge Base."""
-    return {
-        "available_schemes": sorted(SCHEMES_KNOWLEDGE_BASE.keys()),
-        "categories": sorted({v["category"] for v in SCHEMES_KNOWLEDGE_BASE.values()}),
-        "total": len(SCHEMES_KNOWLEDGE_BASE),
-        "source": "Schemes Knowledge Base",
-    }
-
-@app.post("/knowledge-base/schemes/query", response_model=SchemeQueryResponse, tags=["Knowledge Base"])
-def query_schemes_knowledge_base(request: SchemeQueryRequest):
-    """
-    Microservice endpoint — Schemes Knowledge Base.
-    Returns government schemes filtered by state and optional category.
-    Called internally by Tool 1 (government_schemes).
-    """
-    results = []
-    for scheme_id, details in SCHEMES_KNOWLEDGE_BASE.items():
-        # Simple state filter: Telangana-specific schemes are flagged in full_name
-        if request.state.lower() not in ("india", "") and \
-           "telangana" in details["full_name"].lower() and \
-           "telangana" not in request.state.lower():
-            continue
-        if request.category and details["category"].lower() != request.category.lower():
-            continue
-        results.append(SchemeDetail(
-            scheme_id=scheme_id,
-            full_name=details["full_name"],
-            benefit=details["benefit"],
-            eligibility=details["eligibility"],
-            category=details["category"],
-        ))
-
-    return SchemeQueryResponse(
-        state=request.state,
-        count=len(results),
-        schemes=results,
-    )
+        return SchemeQueryResponse(
+            state=request.state,
+            count=len(results),
+            schemes=results,
+        )
+        
+    raise HTTPException(status_code=404, detail=f"Knowledge base '{domain}' not found. Use 'pests' or 'schemes'.")
 
 # ============================================================
 # TOOLS  (now backed by the knowledge-base endpoints above)
