@@ -26,12 +26,17 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 # ============================================================
 load_dotenv()
 
-GOOGLE_API_KEY    = os.getenv("GOOGLE_API_KEY", "")
 API_KEY           = os.getenv("API_KEY", "")
 langsmith_api_key = os.getenv("LANGSMITH_API_KEY", "")
 
+def get_google_api_key() -> str:
+    """Read GOOGLE_API_KEY lazily at call time so Render env vars are available."""
+    key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY", "")
+    if not key:
+        raise ValueError("GOOGLE_API_KEY is not set. Add it to your Render environment variables.")
+    return key
+
 # LangSmith auto-tracing — no decorators needed
-# Just set env vars and every LangChain/LangGraph call is traced automatically
 if langsmith_api_key:
     os.environ["LANGCHAIN_TRACING_V2"] = "true"
     os.environ["LANGCHAIN_ENDPOINT"]   = "https://api.smith.langchain.com"
@@ -72,74 +77,260 @@ def save_history(chat_id: str, messages: list):
     in_memory_history[chat_id] = messages
 
 # ============================================================
-# TOOLS
+# KNOWLEDGE BASES  (single source of truth used by both the
+#                   /knowledge-base/* endpoints AND the tools)
 # ============================================================
+
+PESTS_KNOWLEDGE_BASE: Dict[str, Dict[str, str]] = {
+    "rice":      {"pests": "Stem Borer, Brown Plant Hopper", "diseases": "Blast, Sheath Blight", "treatment": "Use Tricyclazole for blast and Chlorantraniliprole for stem borer."},
+    "wheat":     {"pests": "Aphids, Hessian Fly", "diseases": "Rust (Yellow/Brown/Black), Loose Smut", "treatment": "Maintain proper irrigation and use fungicides if yellow spots appear."},
+    "tomato":    {"pests": "Whitefly, Fruit Borer", "diseases": "Early Blight, Late Blight, Leaf Curl Virus", "treatment": "Increase spacing and apply copper-based fungicides."},
+    "cotton":    {"pests": "Pink Bollworm, Bollweevil, Whitefly", "diseases": "Cotton Leaf Curl Virus, Fusarium Wilt", "treatment": "Use pheromone traps and avoid late sowing."},
+    "maize":     {"pests": "Fall Armyworm, Stem Borer", "diseases": "Downy Mildew, Maize Streak Virus", "treatment": "Apply Emamectin Benzoate or Spinetoram. Check leaves for egg masses."},
+    "sugarcane": {"pests": "Woolly Aphid, Top Shoot Borer", "diseases": "Red Rot, Smut, Ratoon Stunting", "treatment": "Use resistant varieties and spray Dimethoate."},
+    "soybean":   {"pests": "Aphids, Pod Borer", "diseases": "Soybean Mosaic Virus, Rust", "treatment": "Control aphid vectors with Imidacloprid and remove infected plants."},
+    "groundnut": {"pests": "Thrips, Leaf Miner", "diseases": "Leaf Spot, Tikka Disease, Stem Rot", "treatment": "Apply Mancozeb every 10–15 days during humid conditions."},
+    "sunflower": {"pests": "Capitulum Borer, Aphids", "diseases": "Downy Mildew, Alternaria Blight", "treatment": "Use metalaxyl-treated seeds and avoid waterlogging."},
+    "chilli":    {"pests": "Thrips, Mites, Aphids", "diseases": "Anthracnose, Leaf Curl, Powdery Mildew", "treatment": "Spray Abamectin or Fipronil. Avoid water stress."},
+    "onion":     {"pests": "Thrips, Bulb Mite", "diseases": "Purple Blotch, Stemphylium Blight", "treatment": "Apply Mancozeb + Carbendazim and maintain field hygiene."},
+    "potato":    {"pests": "Aphids, Tuber Moth", "diseases": "Late Blight, Early Blight, Black Scurf", "treatment": "Apply Cymoxanil + Mancozeb immediately in cool moist conditions."},
+    "mustard":   {"pests": "Aphids, Painted Bug", "diseases": "Alternaria Blight, White Rust, Downy Mildew", "treatment": "Spray Oxydemeton-Methyl and remove crop debris post-harvest."},
+    "banana":    {"pests": "Banana Weevil, Nematodes", "diseases": "Panama Wilt (Fusarium), Sigatoka", "treatment": "Use disease-free suckers and apply Trichoderma to soil."},
+    "mango":     {"pests": "Mango Hopper, Fruit Fly", "diseases": "Powdery Mildew, Anthracnose, Die-back", "treatment": "Spray Imidacloprid for hoppers and Wettable Sulfur for mildew."},
+    "grapes":    {"pests": "Mealybug, Thrips", "diseases": "Downy Mildew, Powdery Mildew, Anthracnose", "treatment": "Apply Fosetyl-Al and Hexaconazole alternately."},
+    "chickpea":  {"pests": "Helicoverpa Pod Borer, Cutworm", "diseases": "Ascochyta Blight, Fusarium Wilt", "treatment": "Apply Indoxacarb or HaNPV. Monitor using pheromone traps."},
+    "coconut":   {"pests": "Rhinoceros Beetle, Eriophyid Mite", "diseases": "Bud Rot, Root Wilt", "treatment": "Apply Carbaryl and remove decaying organic matter."},
+    "papaya":    {"pests": "Aphids, Mites", "diseases": "Papaya Ringspot Virus, Powdery Mildew", "treatment": "Remove infected plants and control aphids with Mineral Oil spray."},
+}
+
+SCHEMES_KNOWLEDGE_BASE: Dict[str, Dict[str, str]] = {
+    "PM-KISAN": {
+        "full_name": "Pradhan Mantri Kisan Samman Nidhi",
+        "benefit": "Financial support of Rs.6,000 per year in three equal instalments.",
+        "eligibility": "Small and marginal farmers with cultivable land.",
+        "category": "income_support",
+    },
+    "PMFBY": {
+        "full_name": "Pradhan Mantri Fasal Bima Yojana",
+        "benefit": "Affordable crop insurance against natural calamities, pests and diseases.",
+        "eligibility": "All farmers including sharecroppers and tenant farmers.",
+        "category": "insurance",
+    },
+    "Soil Health Card": {
+        "full_name": "Soil Health Card Scheme",
+        "benefit": "Free soil testing and customized fertilizer recommendations every 2 years.",
+        "eligibility": "All farmers.",
+        "category": "advisory",
+    },
+    "KCC": {
+        "full_name": "Kisan Credit Card",
+        "benefit": "Short-term credit up to Rs.3 lakh at 7% interest (4% with prompt repayment).",
+        "eligibility": "All farmers, fishermen, and animal husbandry farmers.",
+        "category": "credit",
+    },
+    "AIF": {
+        "full_name": "Agriculture Infrastructure Fund",
+        "benefit": "Rs.1 lakh crore financing facility for post-harvest management infrastructure.",
+        "eligibility": "FPOs, PACS, agri-entrepreneurs, start-ups.",
+        "category": "infrastructure",
+    },
+    "eNAM": {
+        "full_name": "National Agricultural Market",
+        "benefit": "Online transparent trading platform across 1,000+ mandis for better price discovery.",
+        "eligibility": "All farmers with produce registered at linked APMC mandis.",
+        "category": "market_access",
+    },
+    "PMKSY": {
+        "full_name": "Pradhan Mantri Krishi Sinchayee Yojana",
+        "benefit": "Drip and sprinkler irrigation subsidy up to 55% for small/marginal farmers.",
+        "eligibility": "All categories of farmers.",
+        "category": "irrigation",
+    },
+    "PKVY": {
+        "full_name": "Paramparagat Krishi Vikas Yojana",
+        "benefit": "Rs.50,000 per hectare over 3 years to promote organic farming clusters.",
+        "eligibility": "Groups of farmers (minimum 50 per cluster) for organic conversion.",
+        "category": "organic_farming",
+    },
+    "RKVY": {
+        "full_name": "Rashtriya Krishi Vikas Yojana",
+        "benefit": "Flexible block grants to states for holistic agriculture development.",
+        "eligibility": "State governments; benefits flow to farmers through state schemes.",
+        "category": "development",
+    },
+    "PM Kisan MaanDhan": {
+        "full_name": "Pradhan Mantri Kisan MaanDhan Yojana",
+        "benefit": "Pension of Rs.3,000 per month after age 60.",
+        "eligibility": "Small and marginal farmers aged 18–40 years.",
+        "category": "pension",
+    },
+    "Rythu Bandhu": {
+        "full_name": "Rythu Bandhu Scheme (Telangana)",
+        "benefit": "Rs.10,000 per acre per year (Rs.5,000 each for Rabi and Kharif seasons).",
+        "eligibility": "Landowning farmers in Telangana.",
+        "category": "income_support",
+    },
+    "Rythu Bima": {
+        "full_name": "Rythu Bima Scheme (Telangana)",
+        "benefit": "Free life insurance cover of Rs.5 lakh to farmer families.",
+        "eligibility": "Farmers aged 18–59 in Telangana.",
+        "category": "insurance",
+    },
+    "Mission Kakatiya": {
+        "full_name": "Mission Kakatiya (Telangana)",
+        "benefit": "Restoration of tanks and minor irrigation sources to improve water availability.",
+        "eligibility": "All farmers in Telangana benefiting from restored tanks.",
+        "category": "irrigation",
+    },
+    "TM-IP": {
+        "full_name": "Telangana Micro Irrigation Project",
+        "benefit": "100% subsidy for drip and sprinkler irrigation systems.",
+        "eligibility": "All farmers in Telangana.",
+        "category": "irrigation",
+    },
+}
+
+# ============================================================
+# KNOWLEDGE BASE REQUEST / RESPONSE MODELS
+# ============================================================
+
+class PestQueryRequest(BaseModel):
+    crop_name: str
+    location:  str = "general"
+
+class PestQueryResponse(BaseModel):
+    crop_name: str
+    location:  str
+    pests:     str
+    diseases:  str
+    treatment: str
+    source:    str = "Pests Knowledge Base"
+
+class SchemeQueryRequest(BaseModel):
+    state:    str    = "India"
+    category: str    = ""   # optional filter e.g. "irrigation", "insurance"
+
+class SchemeDetail(BaseModel):
+    scheme_id:   str
+    full_name:   str
+    benefit:     str
+    eligibility: str
+    category:    str
+
+class SchemeQueryResponse(BaseModel):
+    state:   str
+    count:   int
+    schemes: List[SchemeDetail]
+    source:  str = "Schemes Knowledge Base"
+
+# ============================================================
+# KNOWLEDGE BASE ENDPOINTS  (Microservices per architecture)
+# ============================================================
+
+@app.get("/knowledge-base/pests", tags=["Knowledge Base"])
+def list_all_pests():
+    """Returns all crops available in the Pests Knowledge Base."""
+    return {
+        "available_crops": sorted(PESTS_KNOWLEDGE_BASE.keys()),
+        "total": len(PESTS_KNOWLEDGE_BASE),
+        "source": "Pests Knowledge Base",
+    }
+
+@app.post("/knowledge-base/pests/query", response_model=PestQueryResponse, tags=["Knowledge Base"])
+def query_pests_knowledge_base(request: PestQueryRequest):
+    """
+    Microservice endpoint — Pests Knowledge Base.
+    Returns pest, disease, and treatment data for a given crop.
+    Called internally by Tool 2 (simulate_pests).
+    """
+    crop_key = request.crop_name.strip().lower()
+    data = PESTS_KNOWLEDGE_BASE.get(crop_key)
+    if not data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No pest data found for crop '{request.crop_name}'. "
+                   f"Available crops: {sorted(PESTS_KNOWLEDGE_BASE.keys())}",
+        )
+    return PestQueryResponse(
+        crop_name=request.crop_name,
+        location=request.location,
+        pests=data["pests"],
+        diseases=data["diseases"],
+        treatment=data["treatment"],
+    )
+
+@app.get("/knowledge-base/schemes", tags=["Knowledge Base"])
+def list_all_schemes():
+    """Returns all scheme IDs available in the Schemes Knowledge Base."""
+    return {
+        "available_schemes": sorted(SCHEMES_KNOWLEDGE_BASE.keys()),
+        "categories": sorted({v["category"] for v in SCHEMES_KNOWLEDGE_BASE.values()}),
+        "total": len(SCHEMES_KNOWLEDGE_BASE),
+        "source": "Schemes Knowledge Base",
+    }
+
+@app.post("/knowledge-base/schemes/query", response_model=SchemeQueryResponse, tags=["Knowledge Base"])
+def query_schemes_knowledge_base(request: SchemeQueryRequest):
+    """
+    Microservice endpoint — Schemes Knowledge Base.
+    Returns government schemes filtered by state and optional category.
+    Called internally by Tool 1 (government_schemes).
+    """
+    results = []
+    for scheme_id, details in SCHEMES_KNOWLEDGE_BASE.items():
+        # Simple state filter: Telangana-specific schemes are flagged in full_name
+        if request.state.lower() not in ("india", "") and \
+           "telangana" in details["full_name"].lower() and \
+           "telangana" not in request.state.lower():
+            continue
+        if request.category and details["category"].lower() != request.category.lower():
+            continue
+        results.append(SchemeDetail(
+            scheme_id=scheme_id,
+            full_name=details["full_name"],
+            benefit=details["benefit"],
+            eligibility=details["eligibility"],
+            category=details["category"],
+        ))
+
+    return SchemeQueryResponse(
+        state=request.state,
+        count=len(results),
+        schemes=results,
+    )
+
+# ============================================================
+# TOOLS  (now backed by the knowledge-base endpoints above)
+# ============================================================
+
 def simulate_pests(crop_name: str, location: str = "general") -> str:
     """Simulates pest and disease activity for a given crop and location."""
-    pest_data = {
-        "rice":      "Possible Blast disease or Stem Borer activity detected. Treatment: Use Tricyclazole for blast and Chlorantraniliprole for stem borer.",
-        "wheat":     "Risk of Rust disease. Maintain proper irrigation and use fungicides if yellow spots appear.",
-        "tomato":    "Early Blight likely due to humidity. Increase spacing and apply copper-based fungicides.",
-        "cotton":    "Pink Bollworm alert! Use pheromone traps and avoid late sowing.",
-        "maize":     "Fall Armyworm detected. Apply Emamectin Benzoate or Spinetoram. Check leaves for egg masses.",
-        "sugarcane": "Risk of Red Rot and Woolly Aphid infestation. Use resistant varieties and spray Dimethoate.",
-        "soybean":   "Soybean Mosaic Virus risk. Control aphid vectors with Imidacloprid and remove infected plants.",
-        "groundnut": "Leaf Spot and Tikka disease alert. Apply Mancozeb every 10-15 days during humid conditions.",
-        "sunflower": "Downy Mildew risk detected. Use metalaxyl-treated seeds and avoid waterlogging.",
-        "chilli":    "Thrips and Mite infestation likely. Spray Abamectin or Fipronil. Avoid water stress.",
-        "onion":     "Purple Blotch and Thrips alert. Apply Mancozeb + Carbendazim and maintain field hygiene.",
-        "potato":    "Late Blight high risk due to cool and moist conditions. Apply Cymoxanil + Mancozeb immediately.",
-        "mustard":   "Aphid and Alternaria Blight warning. Spray Oxydemeton-Methyl and remove crop debris post-harvest.",
-        "banana":    "Panama Wilt (Fusarium) risk. Use disease-free suckers and apply Trichoderma to soil.",
-        "mango":     "Mango Hopper and Powdery Mildew alert. Spray Imidacloprid for hoppers and Wettable Sulfur for mildew.",
-        "grapes":    "Downy and Powdery Mildew risk high. Apply Fosetyl-Al and Hexaconazole alternately.",
-        "peas":      "Powdery Mildew and Pod Borer likely. Use Karathane for mildew and Indoxacarb for borers.",
-        "lentils":   "Stemphylium Blight and Aphid attack. Spray Iprodione and use yellow sticky traps.",
-        "cabbage":   "Diamondback Moth (DBM) alert. Use Spinosad or NSKE 5% spray. Practice crop rotation.",
-        "brinjal":   "Shoot and Fruit Borer infestation. Apply Emamectin Benzoate and remove affected shoots promptly.",
-        "cucumber":  "Downy Mildew and Red Pumpkin Beetle risk. Spray Chlorothalonil and use ash around plant base.",
-        "chickpea":  "Helicoverpa Pod Borer high risk. Apply Indoxacarb or HaNPV. Monitor using pheromone traps.",
-        "jowar":     "Shoot Fly and Aphid alert. Treat seeds with Imidacloprid and spray Dimethoate at early growth.",
-        "bajra":     "Downy Mildew and Ergot disease risk. Use resistant hybrids and apply Metalaxyl seed treatment.",
-        "turmeric":  "Rhizome Rot and Leaf Blotch detected. Treat rhizomes with Mancozeb before planting.",
-        "ginger":    "Soft Rot (Pythium) risk high. Drench soil with Copper Oxychloride and ensure good drainage.",
-        "coffee":    "White Stem Borer and Berry Borer alert. Use Chlorpyrifos and maintain shade tree management.",
-        "tea":       "Blister Blight and Red Spider Mite risk. Apply Hexaconazole and Dicofol respectively.",
-        "coconut":   "Rhinoceros Beetle and Bud Rot alert. Apply Carbaryl and remove decaying organic matter.",
-        "papaya":    "Papaya Ringspot Virus via aphids. Remove infected plants and control aphids with Mineral Oil spray."
-    }
-    result = pest_data.get(
-        crop_name.lower(),
-        f"No specific pest data for {crop_name}. Monitor regularly for unusual leaf patterns or insects."
+    crop_key = crop_name.strip().lower()
+    data = PESTS_KNOWLEDGE_BASE.get(crop_key)
+    if not data:
+        return (
+            f"No specific pest data for '{crop_name}' in the knowledge base. "
+            "Monitor regularly for unusual leaf patterns or insects."
+        )
+    return (
+        f"Pest Simulation Results for {crop_name} in {location}: "
+        f"Common Pests: {data['pests']}. "
+        f"Diseases: {data['diseases']}. "
+        f"Treatment: {data['treatment']}"
     )
-    return f"Pest Simulation Results for {crop_name} in {location}: {result}"
 
 
 def get_government_schemes(state: str = "India") -> str:
     """Retrieves information on agricultural government schemes and subsidies."""
-    schemes = [
-        "PM-KISAN: Financial support of Rs.6,000 per year to small and marginal farmers.",
-        "PM Fasal Bima Yojana: Affordable crop insurance for farmers against natural calamities.",
-        "Soil Health Card Scheme: Helps farmers understand soil nutrient status.",
-        "Kisan Credit Card (KCC): Provides timely credit to farmers for cultivation needs.",
-        "Agriculture Infrastructure Fund (AIF): Rs.1 lakh crore financing for post-harvest infrastructure.",
-        "National Agricultural Market (eNAM): Online trading platform for better price discovery.",
-        "Pradhan Mantri Krishi Sinchayee Yojana (PMKSY): Promotes micro-irrigation for water efficiency.",
-        "Per Drop More Crop: Drip and sprinkler irrigation with subsidy up to 55% for small farmers.",
-        "Paramparagat Krishi Vikas Yojana (PKVY): Promotes organic farming with Rs.50,000/hectare support.",
-        "Rashtriya Krishi Vikas Yojana (RKVY): Holistic agriculture development with flexible funding.",
-        "Digital Agriculture Mission: Promotes AI, IoT, and remote sensing for precision farming.",
-        "National Food Security Mission (NFSM): Increases production of rice, wheat, and pulses.",
-        "Interest Subvention Scheme: Crop loans up to Rs.3 lakh at 7% interest rate.",
-        "Pradhan Mantri Kisan MaanDhan Yojana: Pension of Rs.3,000/month to farmers after age 60.",
-        "Pradhan Mantri Matsya Sampada Yojana: Rs.20,000 crore scheme for fisheries sector.",
-        "Rashtriya Gokul Mission: Develops indigenous bovine breeds for higher milk productivity.",
-        "Rythu Bandhu (Telangana): Rs.10,000 per acre per year to farming land owners.",
-        "Rythu Bima (Telangana): Free life insurance of Rs.5 lakh to farmers aged 18-59.",
-        "Mission Kakatiya (Telangana): Restoration of tanks and minor irrigation sources.",
-        "Telangana Micro Irrigation Project: 100% subsidy for drip and sprinkler irrigation."
-    ]
-    return f"Active Government Schemes for {state}: " + " | ".join(schemes)
+    lines = []
+    for scheme_id, details in SCHEMES_KNOWLEDGE_BASE.items():
+        # Skip Telangana-specific schemes when state is not Telangana
+        if "telangana" in details["full_name"].lower() and \
+           "telangana" not in state.lower() and state.lower() != "india":
+            continue
+        lines.append(f"{details['full_name']}: {details['benefit']}")
+
+    return f"Active Government Schemes for {state}: " + " | ".join(lines)
 
 
 def get_gemini_fallback(query: str) -> tuple[str, str]:
@@ -148,7 +339,7 @@ def get_gemini_fallback(query: str) -> tuple[str, str]:
         llm_fb = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
             temperature=0.7,
-            google_api_key=GOOGLE_API_KEY,
+            google_api_key=get_google_api_key(),
         )
         response = llm_fb.invoke([
             SystemMessage(content="You are an expert agricultural assistant."),
@@ -178,11 +369,17 @@ TOOLS = [pest_simulation_tool, government_schemes_tool]
 class State(TypedDict):
     messages: Annotated[list, add_messages]
 
-llm_agent      = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0, google_api_key=GOOGLE_API_KEY)
-llm_with_tools = llm_agent.bind_tools(TOOLS, tool_choice="auto")
+def get_llm_with_tools():
+    """Lazily initialize LLM so GOOGLE_API_KEY is read at request time."""
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        temperature=0,
+        google_api_key=get_google_api_key(),
+    )
+    return llm.bind_tools(TOOLS, tool_choice="auto")
 
 def agent_node(state: State):
-    return {"messages": [llm_with_tools.invoke(state["messages"])]}
+    return {"messages": [get_llm_with_tools().invoke(state["messages"])]}
 
 def should_continue(state: State):
     last = state["messages"][-1]
@@ -308,7 +505,6 @@ Use government_schemes for subsidy/scheme questions.
 Write in PLAIN TEXT only.""")] + history
         history.append(HumanMessage(content=request.message))
 
-        # This entire invoke is auto-traced by LangSmith
         result    = app_agent.invoke({"messages": history})
         final_ans = extract_final_answer(result)
         save_history(request.chatId, result["messages"])
